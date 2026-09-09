@@ -15,22 +15,26 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef DRIVER_INTERFACE_H
-#define DRIVER_INTERFACE_H
+#include "threadpool.h"
 
-#include <string>
-#include <cstdint>
-#include <memory>
-#include <span>
-
-#include "modem_interface.h"
-
-class DriverInterface
+ThreadPool::ThreadPool(size_t threads)
 {
-public:
-    virtual std::string driverName() const = 0;
+    for (auto i = 0; i < threads; ++i)
+    {
+        m_workers.emplace_back([this] {
+            while (true)
+            {
+                std::function<void()> task;
 
-    virtual std::vector<std::shared_ptr<ModemInterface>> getModems() const = 0;
-};
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    m_cv.wait(lock, [this] { return !m_tasks.empty(); });
+                    task = std::move(m_tasks.front());
+                    m_tasks.pop();
+                }
 
-#endif
+                task();
+            }
+        });
+    }
+}

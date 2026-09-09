@@ -1,5 +1,5 @@
 /*
- * This file is part of lpaD (https://github.com/muhammad23012009/lpaD)
+ * This file is part of LPAd (https://github.com/muhammad23012009/LPAd)
  * Copyright (c) 2026 Muhammad Asif  <thevancedgamer@mentallysanemainliners.org>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -25,6 +25,7 @@ class LPAException : public std::runtime_error
 public:
     enum class ErrorType {
         ERROR,
+        BUSY,
         EUICC_CHALLENGE_ERROR,
         AUTHENTICATION_INIT_ERROR,
         SERVER_AUTH_ERROR,
@@ -45,6 +46,8 @@ public:
     ErrorType type() const { return m_type; }
     std::string type_to_string() const {
         switch (m_type) {
+            case ErrorType::BUSY:
+                return "Busy";
             case ErrorType::EUICC_CHALLENGE_ERROR:
                 return "ChallengeError";
             case ErrorType::AUTHENTICATION_INIT_ERROR:

@@ -1,5 +1,5 @@
 /*
- * This file is part of lpaD (https://github.com/muhammad23012009/lpaD)
+ * This file is part of LPAd (https://github.com/muhammad23012009/LPAd)
  * Copyright (c) 2026 Muhammad Asif  <thevancedgamer@mentallysanemainliners.org>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -20,16 +20,26 @@
 #include <iostream>
 #include <string>
 #include <mutex>
+#include <memory>
 
 #include <lpa.h>
 #include <errors.h>
 
+#include <driver_interface.h>
+#include <modem_interface.h>
+
+#include "drivers/gbinder/gbinder.hpp"
+#include "threadpool.h"
+
 SDBUSCPP_REGISTER_STRUCT(EuiccInfo, osVersion, availableMemory)
 SDBUSCPP_REGISTER_STRUCT(EuiccProfile, profileName, serviceProviderName, nickname, iccid, enabled)
+SDBUSCPP_REGISTER_STRUCT(PortInfo, portId, portType, currentPort)
+SDBUSCPP_REGISTER_STRUCT(SlotInfo, slotId, ports)
 
 static int global_counter = 0;
 
-static LPA* g_lpa = nullptr;
+static DriverInterface* g_driver;
+static std::unique_ptr<ThreadPool> g_threadPool;
 static std::mutex g_mutex;
 static std::condition_variable g_cv;
 static bool g_confirmed = false;
@@ -72,6 +82,14 @@ public:
     using return_type = std::decay_t<Ret>;
 };
 
+template <typename Ret, typename Class, typename... Args>
+class Signature<Ret(Class::*)(Args...) const>
+{
+public:
+    using arguments = std::tuple<std::decay_t<Args>...>;
+    using return_type = std::decay_t<Ret>;
+};
+
 template <typename T>
 struct ShowType;
 
@@ -79,7 +97,7 @@ template <typename Ptr, typename Func>
 auto invoke(Ptr ptr, Func&& func)
 {
     return [ptr, func = std::forward<Func>(func)](sdbus::MethodCall call) {
-        std::thread([ptr, func = std::move(func), call = std::move(call)]() mutable {
+        g_threadPool->post([ptr, func = std::move(func), call = std::move(call)]() mutable {
             try {
                 using Args = Signature<decltype(func)>::arguments;
                 using Ret = Signature<decltype(func)>::return_type;
@@ -117,90 +135,177 @@ auto invoke(Ptr ptr, Func&& func)
                 call.createErrorReply(error).send();
                 return;
             }
-        }).detach();
+        });
     };
 }
 
-void installProfileHandler(sdbus::MethodCall call)
+auto installProfileHandler(LPA* lpa)
 {
-    sdbus::ObjectPath path{"/com/ubports/lpa/install/" + std::to_string(global_counter++)};
-    auto object = sdbus::createObject(*getConnection(), path);
+    return [lpa](sdbus::MethodCall call) {
+        sdbus::ObjectPath path{"/com/ubports/lpa/install/" + std::to_string(global_counter++)};
+        auto object = sdbus::createObject(*getConnection(), path);
 
-    object->addVTable(sdbus::InterfaceName{"com.ubports.lpa.Install"}, {
-        sdbus::MethodVTableItem{sdbus::MethodName{"ProfileInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(ssssb)"}, {}, [](sdbus::MethodCall call) {
-            auto reply = call.createReply();
-            reply << g_profile;
-            reply.send();
-        }, {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"ConfirmInstall"}, sdbus::Signature{"b"}, {}, sdbus::Signature{""}, {}, [](sdbus::MethodCall call) {
-            bool confirmed;
-            call >> confirmed;
+        object->addVTable(sdbus::InterfaceName{"com.ubports.lpa.Install"}, {
+            sdbus::MethodVTableItem{sdbus::MethodName{"ProfileInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(ssssb)"}, {}, [](sdbus::MethodCall call) {
+                auto reply = call.createReply();
+                reply << g_profile;
+                reply.send();
+            }, {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"ConfirmInstall"}, sdbus::Signature{"b"}, {}, sdbus::Signature{""}, {}, [](sdbus::MethodCall call) {
+                bool confirmed;
+                call >> confirmed;
 
-            g_confirmed = confirmed;
+                g_confirmed = confirmed;
 
-            call.createReply().send();
+                call.createReply().send();
 
-            std::unique_lock<std::mutex> lock(g_mutex);
-            g_cv.notify_all();
-        }, {}}
-    });
-
-    std::string smdp, activationCode, confirmationCode;
-    call >> smdp >> activationCode >> confirmationCode;
-
-    std::thread([object = std::move(object), path, smdp, activationCode, confirmationCode]() mutable {
-        try {
-            g_lpa->installProfile(smdp, activationCode, confirmationCode, [](EuiccProfile profile) -> bool {
                 std::unique_lock<std::mutex> lock(g_mutex);
-                g_profile = profile;
-                g_cv.wait(lock);
+                g_cv.notify_all();
+            }, {}}
+        });
 
-                auto ret = g_confirmed;
-                g_confirmed = false;
+        std::string smdp, activationCode, confirmationCode;
+        call >> smdp >> activationCode >> confirmationCode;
 
-                return ret;
-            });
-        } catch (const LPAException& e) {
-            auto signal = g_object->createSignal(sdbus::InterfaceName{"com.ubports.lpa"}, sdbus::MethodName{"InstallError"});
-            signal << path << e.type_to_string() << e.what();
-            g_object->emitSignal(signal);
-        }
-    }).detach();
+        g_threadPool->post([object = object.release(), path, smdp, activationCode, confirmationCode, lpa]() mutable {
+            try {
+                lpa->installProfile(smdp, activationCode, confirmationCode, [](EuiccProfile profile) -> bool {
+                    std::unique_lock<std::mutex> lock(g_mutex);
+                    g_profile = profile;
+                    g_cv.wait(lock);
 
-    auto reply = call.createReply();
-    reply << path;
-    reply.send();
+                    auto ret = g_confirmed;
+                    g_confirmed = false;
+
+                    return ret;
+                });
+            } catch (const LPAException& e) {
+                auto signal = g_object->createSignal(sdbus::InterfaceName{"com.ubports.lpa"}, sdbus::MethodName{"InstallError"});
+                signal << path << e.type_to_string() << e.what();
+                g_object->emitSignal(signal);
+            }
+
+            delete object;
+        });
+
+        auto reply = call.createReply();
+        reply << path;
+        reply.send();
+    };
 }
 
 int main(void)
 {
     _init_libcurl();
-    g_lpa = new LPA();
+    std::vector<std::string> modemPaths;
+    std::vector<std::unique_ptr<sdbus::IObject>> modemObjects;
+    std::vector<std::unique_ptr<sdbus::IObject>> euiccObjects;
+    std::vector<std::unique_ptr<LPA>> lpaInstances;
+
+    if (GBinderDriver::usable())
+    {
+        g_driver = new GBinderDriver();
+    }
+    else
+    {
+        std::cerr << "No usable driver found" << std::endl;
+        return 1;
+    }
+
+    // TODO: add some way to make sure the dbus signatures never deviate from the actual method signatures
     auto connection = getConnection();
+    g_threadPool = std::make_unique<ThreadPool>(4);
+
+    for (const auto& modem : g_driver->getModems())
+    {
+        sdbus::ObjectPath path{"/com/ubports/lpa/" + modem->modemName()};
+        modemPaths.push_back(path.c_str());
+        auto object = sdbus::createObject(*connection, path);
+
+        sdbus::InterfaceName interface{"com.ubports.lpa.Modem"};
+        object->addVTable(interface, {
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetMEPMode"}, sdbus::Signature{""}, {}, sdbus::Signature{"i"}, {}, invoke(modem.get(), &ModemInterface::supportedMEPMode), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetPhysicalSlots"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ia(iib))"}, {}, invoke(modem.get(), &ModemInterface::physicalSlots), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"SetPortMapping"}, sdbus::Signature{"ii"}, {}, sdbus::Signature{""}, {}, invoke(modem.get(), &ModemInterface::setPortMapping), {}},
+        });
+        modemObjects.push_back(std::move(object));
+
+        modem->addEuiccInterfacesChangedCallbacks(
+            [&euiccObjects, &lpaInstances, path](auto euiccInterface) {
+                sdbus::ObjectPath euiccPath{path + "/slot" + std::to_string(euiccInterface->slotId())};
+                auto object = sdbus::createObject(*getConnection(), euiccPath);
+                auto lpa = std::make_unique<LPA>(euiccInterface);
+                sdbus::InterfaceName interface{"com.ubports.lpa.Euicc"};
+
+                object->addVTable(interface, {
+                    sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(lpa.get(), &LPA::getEid), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(lpa.get(), &LPA::getEuiccInfo), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(lpa.get(), &LPA::getProfiles), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::enableProfile), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::disableProfile), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler(lpa.get()), {}},
+                    sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::removeProfile), {}},
+                });
+
+                if (euiccInterface->slotId() >= euiccObjects.size())
+                {
+                    euiccObjects.resize(euiccInterface->slotId() + 1);
+                    lpaInstances.resize(euiccInterface->slotId() + 1);
+                }
+
+                euiccObjects[euiccInterface->slotId()] = std::move(object);
+                lpaInstances[euiccInterface->slotId()] = std::move(lpa);
+            },
+            [&euiccObjects, &lpaInstances, path](int slotId) {
+                euiccObjects.erase(euiccObjects.begin() + slotId);
+                lpaInstances.erase(lpaInstances.begin() + slotId);
+            }
+        );
+
+        euiccObjects.resize(modem->euiccInterfaces().size() + 1);
+        lpaInstances.resize(modem->euiccInterfaces().size() + 1);
+
+        for (const auto& euicc : modem->euiccInterfaces())
+        {
+            sdbus::ObjectPath euiccPath{path + "/slot" + std::to_string(euicc->slotId())};
+            auto object = sdbus::createObject(*getConnection(), euiccPath);
+            auto lpa = std::make_unique<LPA>(euicc);
+            sdbus::InterfaceName interface{"com.ubports.lpa.Euicc"};
+
+            object->addVTable(interface, {
+                sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(lpa.get(), &LPA::getEid), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(lpa.get(), &LPA::getEuiccInfo), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(lpa.get(), &LPA::getProfiles), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::enableProfile), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::disableProfile), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler(lpa.get()), {}},
+                sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::removeProfile), {}},
+            });
+
+            euiccObjects[euicc->slotId()] = std::move(object);
+            lpaInstances[euicc->slotId()] = std::move(lpa);
+        }
+    }
+
 
     sdbus::ObjectPath path{"/com/ubports/lpa"};
     g_object = sdbus::createObject(*connection, path);
 
     sdbus::InterfaceName interface{"com.ubports.lpa"};
     g_object->addVTable(interface, {
-        sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(g_lpa, &LPA::getEid), {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(g_lpa, &LPA::getEuiccInfo), {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(g_lpa, &LPA::getProfiles), {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(g_lpa, &LPA::enableProfile), {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(g_lpa, &LPA::disableProfile), {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler, {}},
-        sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(g_lpa, &LPA::removeProfile), {}},
-    });
-
-    g_lpa->addProfileChangedCallback([](EuiccProfile profile) {
-        auto signal = g_object->createSignal(sdbus::InterfaceName{"com.ubports.lpa"}, sdbus::MethodName{"ProfileChanged"});
-        signal << profile;
-        g_object->emitSignal(signal);
+        sdbus::MethodVTableItem{sdbus::MethodName{"GetModems"}, sdbus::Signature{""}, {}, sdbus::Signature{"ao"}, {}, [modemPaths](sdbus::MethodCall call) {
+            auto reply = call.createReply();
+            std::vector<sdbus::ObjectPath> paths;
+            for (const auto& modemPath : modemPaths)
+            {
+                paths.emplace_back(modemPath);
+            }
+            reply << paths;
+            reply.send();
+        }, {}},
     });
 
     connection->enterEventLoop();
-
-    delete g_lpa;
 
     return 0;
 }

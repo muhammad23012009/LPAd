@@ -1,5 +1,5 @@
 /*
- * This file is part of lpaD (https://github.com/muhammad23012009/lpaD)
+ * This file is part of LPAd (https://github.com/muhammad23012009/LPAd)
  * Copyright (c) 2026 Muhammad Asif  <thevancedgamer@mentallysanemainliners.org>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,8 +22,10 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <mutex>
 
 #include "driver_interface.h"
+#include "errors.h"
 
 extern "C" {
 #include <euicc.h>
@@ -56,7 +58,7 @@ class LPA
 public:
     using ProfileConfirmationCallback = std::function<bool(EuiccProfile)>;
 
-    LPA();
+    LPA(std::shared_ptr<EuiccInterface> euiccInterface);
 
     // Returns a string representing the EID of the eUICC
     std::string getEid();
@@ -77,8 +79,6 @@ public:
 
     void removeProfile(const std::string& iccid);
 
-    int meow(int a, int b, int c);
-
     void addProfileChangedCallback(std::function<void(EuiccProfile)> callback) {
         m_profileChangedCallback = callback;
     }
@@ -87,8 +87,15 @@ private:
     class EuiccLockGuard
     {
     public:
-        EuiccLockGuard(euicc_ctx* ctx) : m_ctx(ctx)
+        EuiccLockGuard(euicc_ctx* ctx, std::mutex& mutex):
+          m_ctx(ctx),
+          m_mutex(mutex)
         {
+            if (!m_mutex.try_lock())
+            {
+                throw LPAException(LPAException::ErrorType::BUSY, "eUICC is busy");
+            }
+
             if (m_ctx)
             {
                 euicc_init(m_ctx);
@@ -101,9 +108,11 @@ private:
             {
                 euicc_fini(m_ctx);
             }
+            m_mutex.unlock();
         }
     
         euicc_ctx* m_ctx;
+        std::mutex& m_mutex;
     };
 
     class ES10bGuard
@@ -171,7 +180,8 @@ private:
     // Map of ICCID to EuiccProfiles
     std::map<std::string, EuiccProfile> m_profiles;
     euicc_ctx* m_ctx;
-    DriverInterface* m_driver;
+    std::mutex m_mutex;
+    std::shared_ptr<EuiccInterface> m_euiccInterface;
 };
 
 #endif
