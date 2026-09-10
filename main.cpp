@@ -200,6 +200,33 @@ int main(void)
     auto connection = getConnection();
     g_threadPool = std::make_unique<ThreadPool>(4);
 
+    auto createEuiccInterface = [&euiccObjects, &lpaInstances](const std::string& modemPath, std::shared_ptr<EuiccInterface> euiccInterface)
+    {
+        sdbus::ObjectPath euiccPath{modemPath + "/slot" + std::to_string(euiccInterface->slotId())};
+        auto object = sdbus::createObject(*getConnection(), euiccPath);
+        auto lpa = std::make_unique<LPA>(euiccInterface);
+        sdbus::InterfaceName interface{"com.ubports.lpa.Euicc"};
+
+        object->addVTable(interface, {
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(lpa.get(), &LPA::getEid), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(lpa.get(), &LPA::getEuiccInfo), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(lpa.get(), &LPA::getProfiles), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::enableProfile), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::disableProfile), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler(lpa.get()), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::removeProfile), {}},
+        });
+
+        if (euiccInterface->slotId() >= euiccObjects.capacity())
+        {
+            euiccObjects.resize(euiccInterface->slotId() + 1);
+            lpaInstances.resize(euiccInterface->slotId() + 1);
+        }
+
+        euiccObjects[euiccInterface->slotId()] = std::move(object);
+        lpaInstances[euiccInterface->slotId()] = std::move(lpa);
+    };
+
     for (const auto& modem : g_driver->getModems())
     {
         sdbus::ObjectPath path{"/com/ubports/lpa/" + modem->modemName()};
@@ -215,30 +242,8 @@ int main(void)
         modemObjects.push_back(std::move(object));
 
         modem->addEuiccInterfacesChangedCallbacks(
-            [&euiccObjects, &lpaInstances, path](auto euiccInterface) {
-                sdbus::ObjectPath euiccPath{path + "/slot" + std::to_string(euiccInterface->slotId())};
-                auto object = sdbus::createObject(*getConnection(), euiccPath);
-                auto lpa = std::make_unique<LPA>(euiccInterface);
-                sdbus::InterfaceName interface{"com.ubports.lpa.Euicc"};
-
-                object->addVTable(interface, {
-                    sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(lpa.get(), &LPA::getEid), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(lpa.get(), &LPA::getEuiccInfo), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(lpa.get(), &LPA::getProfiles), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::enableProfile), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::disableProfile), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler(lpa.get()), {}},
-                    sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::removeProfile), {}},
-                });
-
-                if (euiccInterface->slotId() >= euiccObjects.size())
-                {
-                    euiccObjects.resize(euiccInterface->slotId() + 1);
-                    lpaInstances.resize(euiccInterface->slotId() + 1);
-                }
-
-                euiccObjects[euiccInterface->slotId()] = std::move(object);
-                lpaInstances[euiccInterface->slotId()] = std::move(lpa);
+            [createEuiccInterface, &euiccObjects, &lpaInstances, path](auto euiccInterface) {
+                createEuiccInterface(path.c_str(), euiccInterface);
             },
             [&euiccObjects, &lpaInstances, path](int slotId) {
                 euiccObjects.erase(euiccObjects.begin() + slotId);
@@ -251,23 +256,7 @@ int main(void)
 
         for (const auto& euicc : modem->euiccInterfaces())
         {
-            sdbus::ObjectPath euiccPath{path + "/slot" + std::to_string(euicc->slotId())};
-            auto object = sdbus::createObject(*getConnection(), euiccPath);
-            auto lpa = std::make_unique<LPA>(euicc);
-            sdbus::InterfaceName interface{"com.ubports.lpa.Euicc"};
-
-            object->addVTable(interface, {
-                sdbus::MethodVTableItem{sdbus::MethodName{"GetEid"}, sdbus::Signature{""}, {}, sdbus::Signature{"s"}, {}, invoke(lpa.get(), &LPA::getEid), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"GetEuiccInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(si)"}, {}, invoke(lpa.get(), &LPA::getEuiccInfo), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"GetProfiles"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ssssb)"}, {}, invoke(lpa.get(), &LPA::getProfiles), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"EnableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::enableProfile), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"DisableProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::disableProfile), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"InstallProfile"}, sdbus::Signature{"sss"}, {}, sdbus::Signature{"o"}, {}, installProfileHandler(lpa.get()), {}},
-                sdbus::MethodVTableItem{sdbus::MethodName{"RemoveProfile"}, sdbus::Signature{"s"}, {}, sdbus::Signature{""}, {}, invoke(lpa.get(), &LPA::removeProfile), {}},
-            });
-
-            euiccObjects[euicc->slotId()] = std::move(object);
-            lpaInstances[euicc->slotId()] = std::move(lpa);
+            createEuiccInterface(path.c_str(), euicc);
         }
     }
 
