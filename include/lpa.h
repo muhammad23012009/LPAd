@@ -20,9 +20,11 @@
 
 #include <iostream>
 #include <string>
+#include <condition_variable>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 
 #include "driver_interface.h"
 #include "errors.h"
@@ -75,9 +77,28 @@ public:
     void disableProfile(const std::string& iccid);
 
     // Start an install operation for a profile. Takes a callback for installation confirmation
-    void installProfile(const std::string& smdp, const std::string& activationCode, const std::string& confirmationCode, ProfileConfirmationCallback callback);
+    void installProfile(const std::string& smdp, const std::string& activationCode, const std::string& confirmationCode);
 
     void removeProfile(const std::string& iccid);
+
+    std::optional<EuiccProfile> getPendingProfile() const {
+        return m_pendingProfile;
+    }
+
+    bool pendingConfirmation() const {
+        return m_pendingProfile.has_value();
+    }
+
+    void confirmInstall(bool confirm)
+    {
+        m_pendingProfile.reset();
+        m_pendingConfirmation = confirm;
+
+        {
+            std::unique_lock lock(m_pendingProfileMutex);
+            m_pendingProfileCv.notify_one();
+        }
+    }
 
     void addProfileChangedCallback(std::function<void(EuiccProfile)> callback) {
         m_profileChangedCallback = callback;
@@ -174,6 +195,12 @@ private:
     };
 
     void processNotifications();
+
+    // Pending profile stored during profile install for confirmation
+    std::optional<EuiccProfile> m_pendingProfile;
+    std::condition_variable m_pendingProfileCv;
+    std::mutex m_pendingProfileMutex;
+    bool m_pendingConfirmation = false;
 
     bool m_esimsCached = false;
     std::function<void(EuiccProfile)> m_profileChangedCallback;

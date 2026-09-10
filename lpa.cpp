@@ -224,7 +224,7 @@ void LPA::disableProfile(const std::string& iccid)
         m_profileChangedCallback(m_profiles[iccid]);
 }
 
-void LPA::installProfile(const std::string& smdp, const std::string& activationCode, const std::string& confirmationCode, ProfileConfirmationCallback callback)
+void LPA::installProfile(const std::string& smdp, const std::string& activationCode, const std::string& confirmationCode)
 {
     int ret = 0;
     EuiccProfile profile;
@@ -258,14 +258,20 @@ void LPA::installProfile(const std::string& smdp, const std::string& activationC
     if (m_ctx->http._internal.prepare_download_param->b64_profileMetadata)
     {
         ES8pGuard guard(&metadata);
+        std::unique_lock lock(m_pendingProfileMutex);
 
         es8p_metadata_parse(&metadata, m_ctx->http._internal.prepare_download_param->b64_profileMetadata);
         profile.profileName = metadata->profileName;
         profile.serviceProviderName = metadata->serviceProviderName;
         profile.iccid = metadata->iccid;
         profile.enabled = false;
+        m_pendingProfile = profile;
 
-        bool allowed = callback(profile);
+        m_pendingProfileCv.wait(lock, [this] { return pendingConfirmation(); });
+
+        bool allowed = m_pendingConfirmation;
+        m_pendingConfirmation = false;
+
         if (!allowed)
             throw LPAException(LPAException::ErrorType::PROFILE_INSTALL_REJECTED, "Rejected by user");
     }

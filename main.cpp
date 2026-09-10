@@ -40,12 +40,7 @@ static int global_counter = 0;
 
 static DriverInterface* g_driver;
 static std::unique_ptr<ThreadPool> g_threadPool;
-static std::mutex g_mutex;
-static std::condition_variable g_cv;
-static bool g_confirmed = false;
-static EuiccProfile g_profile;
 
-std::unique_ptr<sdbus::IConnection> g_connection;
 std::unique_ptr<sdbus::IObject> g_object;
 
 constexpr std::string_view SERVICE_NAME = "com.ubports.lpa";
@@ -54,13 +49,14 @@ int _init_libcurl(void);
 
 auto getConnection()
 {
-    if (!g_connection)
+    static std::unique_ptr<sdbus::IConnection> connection;
+    if (!connection)
     {
         sdbus::ServiceName name{"com.ubports.lpa"};
-        g_connection = sdbus::createBusConnection(name);
+        connection = sdbus::createBusConnection(name);
     }
 
-    return g_connection.get();
+    return connection.get();
 }
 
 template <typename Functor>
@@ -146,21 +142,18 @@ auto installProfileHandler(LPA* lpa)
         auto object = sdbus::createObject(*getConnection(), path);
 
         object->addVTable(sdbus::InterfaceName{"com.ubports.lpa.Install"}, {
-            sdbus::MethodVTableItem{sdbus::MethodName{"ProfileInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(ssssb)"}, {}, [](sdbus::MethodCall call) {
+            sdbus::MethodVTableItem{sdbus::MethodName{"ProfileInfo"}, sdbus::Signature{""}, {}, sdbus::Signature{"(ssssb)"}, {}, [lpa](sdbus::MethodCall call) {
                 auto reply = call.createReply();
-                reply << g_profile;
+                reply << lpa->getPendingProfile().value();
                 reply.send();
             }, {}},
-            sdbus::MethodVTableItem{sdbus::MethodName{"ConfirmInstall"}, sdbus::Signature{"b"}, {}, sdbus::Signature{""}, {}, [](sdbus::MethodCall call) {
+            sdbus::MethodVTableItem{sdbus::MethodName{"ConfirmInstall"}, sdbus::Signature{"b"}, {}, sdbus::Signature{""}, {}, [lpa](sdbus::MethodCall call) {
                 bool confirmed;
                 call >> confirmed;
 
-                g_confirmed = confirmed;
+                lpa->confirmInstall(confirmed);
 
                 call.createReply().send();
-
-                std::unique_lock<std::mutex> lock(g_mutex);
-                g_cv.notify_all();
             }, {}}
         });
 
@@ -169,16 +162,7 @@ auto installProfileHandler(LPA* lpa)
 
         g_threadPool->post([object = object.release(), path, smdp, activationCode, confirmationCode, lpa]() mutable {
             try {
-                lpa->installProfile(smdp, activationCode, confirmationCode, [](EuiccProfile profile) -> bool {
-                    std::unique_lock<std::mutex> lock(g_mutex);
-                    g_profile = profile;
-                    g_cv.wait(lock);
-
-                    auto ret = g_confirmed;
-                    g_confirmed = false;
-
-                    return ret;
-                });
+                lpa->installProfile(smdp, activationCode, confirmationCode);
             } catch (const LPAException& e) {
                 auto signal = g_object->createSignal(sdbus::InterfaceName{"com.ubports.lpa"}, sdbus::MethodName{"InstallError"});
                 signal << path << e.type_to_string() << e.what();
