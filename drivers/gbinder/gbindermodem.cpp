@@ -19,6 +19,7 @@
 #include "gbinderinterface.h"
 #include "gbinder.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 constexpr const char* HIDL_RADIO_CONFIG_IFACE = "android.hardware.radio.config@1.0::IRadioConfig";
@@ -31,8 +32,13 @@ constexpr uint8_t T_MASK = 0b00001111;
 constexpr uint8_t T_GLOBAL_IDENTIFIER = 15;
 
 GMainLoop* g_binderLoop = nullptr;
-std::vector<SlotInfo> g_slotStatus;
+std::vector<PhysicalSlot> g_physicalSlots;
+std::vector<AidlSlot> g_aidlSlots;
+std::vector<int> g_slotMapping;
 bool g_slotStatusReceived = false;
+bool g_slotMappingChangeReceived = false;
+
+// TODO: use getPhoneCapability to determine number of logical slots, and default to mapping logical slot0 to phys0, and logi1 to phys1 on AIDL
 
 GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRemoteRequest *req, guint code,
                                                           guint flags, int *status, void *user_data)
@@ -61,23 +67,26 @@ GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRe
 
     if (code == HIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS_RESPONSE || code == AIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS_RESPONSE)
     {
-        std::vector<SlotInfo> slots;
+        std::vector<PhysicalSlot> slots;
+        // logical slot index <-> physical slot index mapping
+        std::vector<int> slotMapping;
+        slotMapping.reserve(2);
 
         if (self->m_aidl)
         {
-            binder_read_parcelable_size(&reader);
+            int slotIndex = 0;
+            std::vector<AidlSlot> aidlSlots;
             int slotCount;
+
             gbinder_reader_read_int32(&reader, &slotCount);
 
             for (int i = 0; i < slotCount; ++i)
             {
-                SlotInfo slot;
-                std::vector<PortInfo> ports;
                 int cardState, portsCount, mepMode;
                 char* atr;
                 char* eid;
 
-                slot.slotId = i;
+                binder_read_parcelable_size(&reader);
 
                 gbinder_reader_read_int32(&reader, &cardState);
                 atr = gbinder_reader_read_string16(&reader);
@@ -85,37 +94,50 @@ GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRe
                 gbinder_reader_read_int32(&reader, &portsCount);
 
                 // Read the ports
-                for (int i = 0; i < portsCount; ++i)
+                for (int j = 0; j < portsCount; ++j)
                 {
-                    PortInfo port;
+                    PhysicalSlot slot;
+                    AidlSlot aidlSlot;
                     int logicalSlotId;
-                    gboolean currentPort;
+                    int currentPort;
+
+                    binder_read_parcelable_size(&reader);
 
                     char* iccid = gbinder_reader_read_string16(&reader);
                     gbinder_reader_read_int32(&reader, &logicalSlotId);
-                    gbinder_reader_read_bool(&reader, &currentPort);
+                    gbinder_reader_read_int32(&reader, &currentPort);
 
-                    port.portId = logicalSlotId;
-                    port.portType = (eid && strlen(eid) > 0) ? PortType::PORT_TYPE_EUICC : PortType::PORT_TYPE_UICC;
-                    port.currentPort = currentPort;
-                    ports.push_back(port);
+                    slot.slotId = slotIndex++;
+                    slot.type = (eid && strlen(eid) > 0) ? SlotType::SLOT_TYPE_EUICC : SlotType::SLOT_TYPE_UICC;
+
+                    // physical slot index
+                    aidlSlot.physicalSlotId = i;
+                    // port index
+                    aidlSlot.portId = j;
+                    // the logical slot this physical slot is mapped to
+                    aidlSlot.logicalSlotId = logicalSlotId;
+                    aidlSlot.type = slot.type;
+                    aidlSlot.current = !!currentPort;
+
+                    slots.push_back(slot);
+                    aidlSlots.push_back(aidlSlot);
+
+                    if (logicalSlotId >= 0 && currentPort)
+                        slotMapping.insert(slotMapping.begin() + logicalSlotId, i);
                 }
 
                 gbinder_reader_read_int32(&reader, &mepMode);
-
-                slot.ports = ports;
-                slots.push_back(slot);
             }
+            g_aidlSlots = aidlSlots;
         }
         else
         {
             gsize slotCount;
             const struct SimSlotStatus* slotArr = gbinder_reader_read_hidl_type_vec(&reader, struct SimSlotStatus, &slotCount);
+
             for (gsize i = 0; i < slotCount; ++i)
             {
-                SlotInfo slot;
-                slot.slotId = i;
-                std::vector<PortInfo> ports;
+                PhysicalSlot slot;
                 std::vector<uint8_t> atr;
                 std::string atrHex = slotArr[i].atr.data.str ? std::string(slotArr[i].atr.data.str, slotArr[i].atr.len) : "";
                 bool euiccSupported = false;
@@ -180,18 +202,23 @@ GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRe
                     }
                 }
 
-                PortInfo port;
-                port.portId = slotArr[i].logicalSlotId;
-                port.portType = euiccSupported ? PortType::PORT_TYPE_EUICC : PortType::PORT_TYPE_UICC;
-                port.currentPort = true; // The single port is always the current port
-                ports.push_back(port);
+                slot.slotId = i;
+                slot.type = euiccSupported ? SlotType::SLOT_TYPE_EUICC : SlotType::SLOT_TYPE_UICC;
 
-                slot.ports = ports;
+                if (slotArr[i].logicalSlotId >= 0)
+                    slotMapping.insert(slotMapping.begin() + slotArr[i].logicalSlotId, i);
+
                 slots.push_back(slot);
             }
         }
         g_slotStatusReceived = true;
-        g_slotStatus = slots;
+        g_physicalSlots = slots;
+        g_slotMapping = slotMapping;
+    }
+
+    if (code == HIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING_RESPONSE || code == AIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING_RESPONSE)
+    {
+        g_slotMappingChangeReceived = true;
     }
 
     g_main_loop_quit(g_binderLoop);
@@ -252,18 +279,17 @@ GBinderModem::GBinderModem(std::shared_ptr<GBinderServiceManager> sm, GMainLoop*
         g_main_loop_run(m_loop);
     }
 
-    m_slotStatus = g_slotStatus;
+    m_physicalSlots = g_physicalSlots;
 
-    // Create the gbinder interfaces for each eUICC slot
-    for (const auto& slot : m_slotStatus)
+    for (auto i = 0; i < g_slotMapping.size(); ++i)
     {
-        for (const auto& port : slot.ports)
+        PhysicalSlot& slot = m_physicalSlots[g_slotMapping[i]];
+
+        if (slot.type == SlotType::SLOT_TYPE_EUICC)
         {
-            if (port.portType == PortType::PORT_TYPE_EUICC && port.currentPort)
-            {
-                auto euiccInterface = std::make_shared<GBinderInterface>(m_sm, m_loop, slot.slotId, m_aidl);
-                m_euiccInterfaces.push_back(euiccInterface);
-            }
+            // Use the logical slot ID to create the gbinder euicc interface
+            auto euiccInterface = std::make_shared<GBinderInterface>(m_sm, loop, static_cast<int>(i), m_aidl);
+            m_euiccInterfaces.push_back(euiccInterface);
         }
     }
 }
@@ -277,13 +303,85 @@ GBinderModem::MEPMode GBinderModem::supportedMEPMode() const
     return MEPMode::NONE;
 }
 
-std::vector<SlotInfo> GBinderModem::physicalSlots() const
+std::vector<PhysicalSlot> GBinderModem::getPhysicalSlots() const
 {
-    return m_slotStatus;
+    return m_physicalSlots;
 }
 
-void GBinderModem::setPortMapping(int slotId, int portId)
+std::vector<LogicalSlot> GBinderModem::getLogicalSlots() const
 {
+    std::vector<LogicalSlot> logicalSlots;
+
+    for (auto i = 0; i < g_slotMapping.size(); ++i)
+    {
+        LogicalSlot logicalSlot;
+        logicalSlot.slotId = static_cast<int>(i);
+        logicalSlot.physicalSlotId = g_slotMapping[i];
+        logicalSlots.push_back(logicalSlot);
+    }
+
+    return logicalSlots;
+}
+
+void GBinderModem::setSlotMapping(int logicalSlotId, int physicalSlotId)
+{
+    auto request = gbinder_client_new_request(m_client);
+    GBinderWriter writer;
+    gbinder_local_request_init_writer(request, &writer);
+    gbinder_writer_append_int32(&writer, 1000);
+
+    // TODO: Maybe move this logic to ModemInterface itself, and make the driver only set their slot mappings?
+    // We first need to check if the requested physical slot is already mapped to a logical slot
+    auto it = std::find_if(g_slotMapping.begin(), g_slotMapping.end(), [physicalSlotId](int mappedPhysicalSlotId) {
+        return mappedPhysicalSlotId == physicalSlotId;
+    });
+    if (it != g_slotMapping.end())
+    {
+        // If it is, then we swap it around
+        auto tmp = g_slotMapping[logicalSlotId];
+        *it = tmp;
+    }
+
+    g_slotMapping[logicalSlotId] = physicalSlotId;
+
+    if (m_aidl)
+    {
+        gbinder_writer_append_int32(&writer, static_cast<int>(g_slotMapping.size()));
+
+        for (auto physicalSlotId : g_slotMapping)
+        {
+            gbinder_writer_append_int32(&writer, 1); // non-nullable
+            auto written = gbinder_writer_bytes_written(&writer);
+            gbinder_writer_append_int32(&writer, -1); // placeholder for size
+
+            try
+            {
+                AidlSlot slot = m_aidlSlots.value().at(physicalSlotId);
+                gbinder_writer_append_int32(&writer, physicalSlotId);
+                gbinder_writer_append_int32(&writer, slot.portId);
+            }
+            catch (const std::out_of_range& e)
+            {
+                gbinder_writer_append_int32(&writer, -1);
+                gbinder_writer_append_int32(&writer, -1);
+            }
+
+            gbinder_writer_overwrite_int32(&writer, written, gbinder_writer_bytes_written(&writer) - written);
+        }
+    }
+    else
+    {
+        gbinder_writer_append_hidl_vec(&writer, g_slotMapping.data(), static_cast<gsize>(g_slotMapping.size()), sizeof(int));
+    }
+
+    gbinder_client_transact_sync_oneway(m_client, m_aidl ? AIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING : HIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING, request);
+    gbinder_local_request_unref(request);
+
+    g_slotMappingChangeReceived = false;
+
+    while (!g_slotMappingChangeReceived) {
+        g_main_loop_run(m_loop);
+    }
 }
 
 std::vector<std::shared_ptr<EuiccInterface>> GBinderModem::euiccInterfaces() const

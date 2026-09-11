@@ -18,6 +18,8 @@
 #ifndef GBINDERMODEM_H
 #define GBINDERMODEM_H
 
+#include <optional>
+
 #include <gbinder.h>
 #include <modem_interface.h>
 
@@ -26,9 +28,15 @@
 #define AIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS_RESPONSE  AIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS
 #define AIDL_RADIO_CONFIG_SET_RESPONSE_FUNCTIONS        7
 
+#define AIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING          8
+#define AIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING_RESPONSE     7
+
 #define HIDL_RADIO_CONFIG_SET_RESPONSE_FUNCTIONS        GBINDER_FIRST_CALL_TRANSACTION
 #define HIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS           (GBINDER_FIRST_CALL_TRANSACTION + 1)
 #define HIDL_RADIO_CONFIG_GET_SIM_SLOT_STATUS_RESPONSE  (GBINDER_FIRST_CALL_TRANSACTION)
+
+#define HIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING          (GBINDER_FIRST_CALL_TRANSACTION + 2)
+#define HIDL_RADIO_CONFIG_SET_SIM_SLOT_MAPPING_RESPONSE     (GBINDER_FIRST_CALL_TRANSACTION + 1)
 
 // HIDL IRadioConfig@1.0 struct
 struct SimSlotStatus
@@ -38,6 +46,15 @@ struct SimSlotStatus
     GBinderHidlString atr;
     uint32_t logicalSlotId;
     GBinderHidlString iccid;
+};
+
+struct AidlSlot
+{
+    int physicalSlotId;
+    int portId;
+    int logicalSlotId;
+    SlotType type;
+    bool current;
 };
 
 class GBinderModem : public ModemInterface
@@ -50,9 +67,11 @@ public:
 
     MEPMode supportedMEPMode() const override;
 
-    std::vector<SlotInfo> physicalSlots() const override;
+    std::vector<PhysicalSlot> getPhysicalSlots() const override;
 
-    void setPortMapping(int slotId, int portId) override;
+    std::vector<LogicalSlot> getLogicalSlots() const override;
+
+    void setSlotMapping(int logicalSlotId, int physicalSlotId) override;
 
     std::vector<std::shared_ptr<EuiccInterface>> euiccInterfaces() const override;
 
@@ -79,7 +98,11 @@ private:
     GBinderClient* m_client = nullptr;
     GMainLoop* m_loop;
 
-    std::vector<SlotInfo> m_slotStatus;
+    // Used to lookup the actual (physical_slot_id, port_id) pair from a PhysicalSlot struct with its index in the vector returned by getPhysicalSlots()
+    std::optional<std::vector<AidlSlot>> m_aidlSlots;
+
+    std::vector<PhysicalSlot> m_physicalSlots;
+
     std::vector<std::shared_ptr<EuiccInterface>> m_euiccInterfaces;
 };
 

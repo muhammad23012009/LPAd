@@ -33,8 +33,8 @@
 
 SDBUSCPP_REGISTER_STRUCT(EuiccInfo, osVersion, availableMemory)
 SDBUSCPP_REGISTER_STRUCT(EuiccProfile, profileName, serviceProviderName, nickname, iccid, enabled)
-SDBUSCPP_REGISTER_STRUCT(PortInfo, portId, portType, currentPort)
-SDBUSCPP_REGISTER_STRUCT(SlotInfo, slotId, ports)
+SDBUSCPP_REGISTER_STRUCT(PhysicalSlot, slotId, type)
+SDBUSCPP_REGISTER_STRUCT(LogicalSlot, slotId, physicalSlotId)
 
 static int global_counter = 0;
 
@@ -236,8 +236,9 @@ int main(void)
         sdbus::InterfaceName interface{"com.ubports.lpa.Modem"};
         object->addVTable(interface, {
             sdbus::MethodVTableItem{sdbus::MethodName{"GetMEPMode"}, sdbus::Signature{""}, {}, sdbus::Signature{"i"}, {}, invoke(modem.get(), &ModemInterface::supportedMEPMode), {}},
-            sdbus::MethodVTableItem{sdbus::MethodName{"GetPhysicalSlots"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ia(iib))"}, {}, invoke(modem.get(), &ModemInterface::physicalSlots), {}},
-            sdbus::MethodVTableItem{sdbus::MethodName{"SetPortMapping"}, sdbus::Signature{"ii"}, {}, sdbus::Signature{""}, {}, invoke(modem.get(), &ModemInterface::setPortMapping), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetPhysicalSlots"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ii)"}, {}, invoke(modem.get(), &ModemInterface::getPhysicalSlots), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"GetLogicalSlots"}, sdbus::Signature{""}, {}, sdbus::Signature{"a(ii)"}, {}, invoke(modem.get(), &ModemInterface::getLogicalSlots), {}},
+            sdbus::MethodVTableItem{sdbus::MethodName{"SetSlotMapping"}, sdbus::Signature{"ii"}, {}, sdbus::Signature{""}, {}, invoke(modem.get(), &ModemInterface::setSlotMapping), {}},
         });
         modemObjects.push_back(std::move(object));
 

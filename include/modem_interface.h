@@ -29,31 +29,30 @@ struct SlotMapping
     int portId;
 };
 
-enum class PortType
+enum class SlotType
 {
-    PORT_TYPE_UICC,
-    PORT_TYPE_EUICC
+    SLOT_TYPE_UICC,
+    SLOT_TYPE_EUICC
 };
 
-struct PortInfo
+// Used to refer to the slots physically present on the device.
+struct PhysicalSlot
 {
-    // The ID of this port. Used to map a port to a physical slot in the modem.
-    int portId;
-
-    // The type of this port.
-    PortType portType;
-
-    // Whether the port is the current port
-    bool currentPort;
-};
-
-struct SlotInfo
-{
-    // The ID of this physical slot. Used by ports to map themselves.
+    // The ID of this physical slot. Used to map the physical slot to a logical slot in the modem.
     int slotId;
 
-    // All the ports that are available to be mapped to this slot.
-    std::vector<PortInfo> ports;
+    // The type of this slot.
+    SlotType type;
+};
+
+// Logical slots are the slots actually visible to the modem. A physical slot can be mapped onto a logical slot.
+struct LogicalSlot
+{
+    // The ID of this logical slot.
+    int slotId;
+
+    // The ID of the physical slot that is currently mapped to this logical slot.
+    int physicalSlotId;
 };
 
 class ModemInterface
@@ -72,12 +71,16 @@ public:
     // Returns the supported MEP mode of the modem
     virtual MEPMode supportedMEPMode() const = 0;
 
-    // Returns the list of physical slots available in the modem, and their ports.
-    virtual std::vector<SlotInfo> physicalSlots() const = 0;
+    // Returns the list of physical slots available in the modem.
+    virtual std::vector<PhysicalSlot> getPhysicalSlots() const = 0;
 
-    // Map a port to a physical slot in the modem. The port is relative to the physical slot.
+    // Returns the list of logical slots available in the modem.
+    // TODO: Should we have some sort of signal or observer that fires when a new physical slot is mapped to a logical slot?
+    virtual std::vector<LogicalSlot> getLogicalSlots() const = 0;
+
+    // Map a physical slot to a logical slot in the modem.
     // TODO: What are we supposed to do about MEP-A2?
-    virtual void setPortMapping(int slotId, int portId) = 0;
+    virtual void setSlotMapping(int logicalSlotId, int physicalSlotId) = 0;
 
     // Returns the list of eUICC interfaces available in the modem.
     // If MEP is supported, the available eUICC interfaces MUST be treated as a single interface,
