@@ -101,10 +101,7 @@ auto invoke(Ptr ptr, Func&& func)
 
                 auto deserialize_arguments = [&]<std::size_t... I>(std::index_sequence<I...>) constexpr {
                     ([&]() constexpr {
-                        using Type = std::tuple_element_t<I, Args>;
-                        Type value;
-                        call >> value;
-                        std::get<I>(funcArgs) = std::move(value);
+                        call >> std::get<I>(funcArgs);
                     }(), ...);
                 };
 
