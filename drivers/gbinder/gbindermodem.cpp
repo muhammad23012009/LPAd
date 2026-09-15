@@ -69,8 +69,7 @@ GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRe
     {
         std::vector<PhysicalSlot> slots;
         // logical slot index <-> physical slot index mapping
-        std::vector<int> slotMapping;
-        slotMapping.reserve(2);
+        std::vector<int> slotMapping = {-1, -1};
 
         if (self->m_aidl)
         {
@@ -123,7 +122,7 @@ GBinderLocalReply* radioConfigResponseHandler(GBinderLocalObject *obj, GBinderRe
                     aidlSlots.push_back(aidlSlot);
 
                     if (logicalSlotId >= 0 && currentPort)
-                        slotMapping.insert(slotMapping.begin() + logicalSlotId, i);
+                        slotMapping.insert(slotMapping.begin() + logicalSlotId, slot.slotId);
                 }
 
                 gbinder_reader_read_int32(&reader, &mepMode);
@@ -280,6 +279,7 @@ GBinderModem::GBinderModem(std::shared_ptr<GBinderServiceManager> sm, GMainLoop*
     }
 
     m_physicalSlots = g_physicalSlots;
+    m_aidlSlots = g_aidlSlots;
 
     for (auto i = 0; i < g_slotMapping.size(); ++i)
     {
@@ -357,7 +357,7 @@ void GBinderModem::setSlotMapping(int logicalSlotId, int physicalSlotId)
             try
             {
                 AidlSlot slot = m_aidlSlots.value().at(physicalSlotId);
-                gbinder_writer_append_int32(&writer, physicalSlotId);
+                gbinder_writer_append_int32(&writer, slot.physicalSlotId);
                 gbinder_writer_append_int32(&writer, slot.portId);
             }
             catch (const std::out_of_range& e)
